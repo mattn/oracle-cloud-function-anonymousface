@@ -90,7 +90,6 @@ func main() {
 			fimg := resize.Resize(uint(face.Scale), uint(face.Scale), maskImg, resize.NearestNeighbor)
 			log.Println(pt.X, pt.Y, face.Scale)
 			draw.Copy(canvas, pt, fimg, fimg.Bounds(), draw.Over, nil)
-			//draw.Draw(canvas, fimg.Bounds(), fimg, pt, draw.Over)
 		}
 		err = jpeg.Encode(out, canvas, &jpeg.Options{Quality: 100})
 		if err != nil {
