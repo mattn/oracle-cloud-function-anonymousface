@@ -1,37 +1,37 @@
 package main
 
-//go:generate go install github.com/rakyll/statik@latest
-//go:generate statik -src=data -f -include "*"
-
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"embed"
+	"encoding/json"
+	"fmt"
 	"image"
-	"image/jpeg"
+	_ "image/jpeg"
+	"image/png"
 	"io"
 	"io/ioutil"
 	"log"
-
-	_ "func/statik"
+	"mime/multipart"
+	"strings"
 
 	pigo "github.com/esimov/pigo/core"
 	fdk "github.com/fnproject/fdk-go"
 	"github.com/nfnt/resize"
-	"github.com/rakyll/statik/fs"
 	"golang.org/x/image/draw"
 )
 
 var (
 	maskImg    image.Image
 	classifier *pigo.Pigo
+
+	//go:embed data
+	fs embed.FS
 )
 
 func init() {
-	statikFS, err := fs.New()
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	f, err := statikFS.Open("/mask.png")
+	f, err := fs.Open("data/mask.png")
 	if err != nil {
 		log.Fatal("cannot open mask.png:", err)
 	}
@@ -42,7 +42,7 @@ func init() {
 		log.Fatal("cannot decode mask.png:", err)
 	}
 
-	f, err = statikFS.Open("/facefinder")
+	f, err = fs.Open("data/facefinder")
 	if err != nil {
 		log.Fatal("cannot open facefinder:", err)
 	}
@@ -60,12 +60,54 @@ func init() {
 	}
 }
 
+type msg struct {
+	Message string `json:"message"`
+}
+
 func main() {
 	fdk.Handle(fdk.HandlerFunc(func(ctx context.Context, in io.Reader, out io.Writer) {
-		img, _, err := image.Decode(in)
+		log.Print("start making anonymousface")
+		fdk.SetHeader(out, "content-type", "application/json")
+
+		b, err := io.ReadAll(in)
 		if err != nil {
-			log.Fatal("cannot decode input image:", err)
+			json.NewEncoder(out).Encode(msg{
+				Message: fmt.Sprintf("cannot decode input image: %v", err),
+			})
 			return
+		}
+		img, _, err := image.Decode(bytes.NewReader(b))
+		if err != nil {
+			line, _, err := bufio.NewReader(bytes.NewReader(b)).ReadLine()
+			if err != nil {
+				json.NewEncoder(out).Encode(msg{
+					Message: fmt.Sprintf("cannot decode input image: %v", err),
+				})
+				return
+			}
+			mr := multipart.NewReader(bytes.NewReader(b), strings.TrimSpace(string(line[2:])))
+			for {
+				mp, err := mr.NextPart()
+				if err != nil {
+					break
+				}
+				if mp.FormName() == "image" {
+					img, _, err = image.Decode(mp)
+					if err != nil {
+						json.NewEncoder(out).Encode(msg{
+							Message: fmt.Sprintf("cannot decode input image: %v ", err),
+						})
+						return
+					}
+					break
+				}
+			}
+			if img == nil {
+				json.NewEncoder(out).Encode(msg{
+					Message: fmt.Sprintf("cannot decode input image: empty image"),
+				})
+				return
+			}
 		}
 		bounds := img.Bounds().Max
 		param := pigo.CascadeParams{
@@ -91,9 +133,14 @@ func main() {
 			log.Println(pt.X, pt.Y, face.Scale)
 			draw.Copy(canvas, pt, fimg, fimg.Bounds(), draw.Over, nil)
 		}
-		err = jpeg.Encode(out, canvas, &jpeg.Options{Quality: 100})
+		fdk.SetHeader(out, "content-type", "image/png")
+		err = png.Encode(out, canvas)
 		if err != nil {
-			log.Fatal("cannot encode output image:", err)
+			log.Print("cannot encode output image:", err)
+			fdk.SetHeader(out, "content-type", "application/json")
+			json.NewEncoder(out).Encode(msg{
+				Message: fmt.Sprintf("cannot encode output image: %v", err),
+			})
 			return
 		}
 	}))
