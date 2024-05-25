@@ -1,7 +1,6 @@
 package main
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"embed"
@@ -13,6 +12,7 @@ import (
 	"io"
 	"io/ioutil"
 	"log"
+	"mime"
 	"mime/multipart"
 	"strings"
 
@@ -64,6 +64,12 @@ type msg struct {
 	Message string `json:"message"`
 }
 
+func inputErr(out io.Writer, v any) {
+	json.NewEncoder(out).Encode(msg{
+		Message: fmt.Sprintf("cannot decode input image: %v", v),
+	})
+}
+
 func main() {
 	fdk.Handle(fdk.HandlerFunc(func(ctx context.Context, in io.Reader, out io.Writer) {
 		log.Print("start making anonymousface")
@@ -71,21 +77,25 @@ func main() {
 
 		b, err := io.ReadAll(in)
 		if err != nil {
-			json.NewEncoder(out).Encode(msg{
-				Message: fmt.Sprintf("cannot decode input image: %v", err),
-			})
+			inputErr(out, err)
 			return
 		}
-		img, _, err := image.Decode(bytes.NewReader(b))
+		fctx, ok := fdk.GetContext(ctx).(fdk.HTTPContext)
+		if !ok {
+			inputErr(out, "invalid format")
+			return
+		}
+		typ, params, err := mime.ParseMediaType(fctx.ContentType())
 		if err != nil {
-			line, _, err := bufio.NewReader(bytes.NewReader(b)).ReadLine()
-			if err != nil {
-				json.NewEncoder(out).Encode(msg{
-					Message: fmt.Sprintf("cannot decode input image: %v", err),
-				})
-				return
-			}
-			mr := multipart.NewReader(bytes.NewReader(b), strings.TrimSpace(string(line[2:])))
+			inputErr(out, err)
+			return
+		}
+
+		var img image.Image
+		if strings.HasPrefix(typ, "image/") {
+			img, _, err = image.Decode(bytes.NewReader(b))
+		} else if typ == "multipart/form-data" {
+			mr := multipart.NewReader(bytes.NewReader(b), params["boundary"])
 			for {
 				mp, err := mr.NextPart()
 				if err != nil {
@@ -94,20 +104,17 @@ func main() {
 				if mp.FormName() == "image" {
 					img, _, err = image.Decode(mp)
 					if err != nil {
-						json.NewEncoder(out).Encode(msg{
-							Message: fmt.Sprintf("cannot decode input image: %v ", err),
-						})
+						inputErr(out, err)
 						return
 					}
 					break
 				}
 			}
 			if img == nil {
-				json.NewEncoder(out).Encode(msg{
-					Message: fmt.Sprintf("cannot decode input image: empty image"),
-				})
+				inputErr(out, "empty image")
 				return
 			}
+		} else {
 		}
 		bounds := img.Bounds().Max
 		param := pigo.CascadeParams{
